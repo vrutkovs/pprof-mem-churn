@@ -67,7 +67,10 @@ func TestHeatmapReadableLargeValues(t *testing.T) {
 }
 
 func TestByteUnits(t *testing.T) {
-	for _, tc := range []struct{ bytes int64; want string }{
+	for _, tc := range []struct {
+		bytes int64
+		want  string
+	}{
 		{0, "0 bytes"}, {1023, "1023 bytes"}, {1024, "1 KiB"},
 		{1536, "1.5 KiB"}, {67108864, "64 MiB"}, {-(2 << 30), "-2 GiB"},
 	} {
@@ -84,24 +87,32 @@ func TestCallPathSkipsMappings(t *testing.T) {
 	stack := "build-hash ← mapping:map-hash:/victoria-metrics-prod ← github.com/VictoriaMetrics/VictoriaMetrics/lib/storage.newRawRows (github.com/VictoriaMetrics/VictoriaMetrics/lib/storage/raw_row.go:315) ← mapping:map-hash:/victoria-metrics-prod ← github.com/VictoriaMetrics/VictoriaMetrics/app/vmstorage.main (github.com/VictoriaMetrics/VictoriaMetrics/app/vmstorage/main.go:43)"
 	r := Report{Snapshots: []SnapshotInput{{}, {}}, Sites: []Site{{Stack: stack, Points: []Point{{}, {}}}}}
 	var out bytes.Buffer
-	if err := renderHTML(&out, r, "latest", 1); err != nil { t.Fatal(err) }
+	if err := renderHTML(&out, r, "latest", 1); err != nil {
+		t.Fatal(err)
+	}
 	html := out.String()
 	if !strings.Contains(html, `class="call-tree"`) || strings.Count(html, `<li class="frame`) != 2 {
 		t.Fatalf("expected two call frames: %s", html)
 	}
-	path := strings.SplitN(strings.SplitN(html, `<ol class="call-tree">`, 2)[1], `</ol>`, 2)[0]
+	path := strings.SplitN(strings.SplitN(html, `<ol class="call-tree"`, 2)[1], `</ol>`, 2)[0]
 	if strings.Index(path, `vmstorage.main`) >= strings.Index(path, `storage.newRawRows`) {
 		t.Fatal("call path must start at caller and end at allocation site")
 	}
 	for _, want := range []string{`lib/storage/raw_row.go:315`, `Profile identity`, `build-hash`, `victoria-metrics-prod`} {
-		if !strings.Contains(html, want) { t.Errorf("missing %q", want) }
+		if !strings.Contains(html, want) {
+			t.Errorf("missing %q", want)
+		}
 	}
-	if strings.Contains(html, `<code class="stack">`) { t.Fatal("raw stack still displayed") }
+	if strings.Contains(html, `<code class="stack">`) {
+		t.Fatal("raw stack still displayed")
+	}
 }
 
 func TestReportUsesLightTheme(t *testing.T) {
 	var out bytes.Buffer
-	if err := renderHTML(&out, Report{Snapshots: []SnapshotInput{{}, {}}}, "latest", 1); err != nil { t.Fatal(err) }
+	if err := renderHTML(&out, Report{Snapshots: []SnapshotInput{{}, {}}}, "latest", 1); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out.String(), "color-scheme:light") || strings.Contains(out.String(), "color-scheme:dark") {
 		t.Fatal("report must use light theme")
 	}
@@ -126,6 +137,27 @@ func TestHeatmapDistinguishesUnknownFromBaseline(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `>unknown change</span>`) || strings.Count(out.String(), `>baseline</span>`) != 1 {
 		t.Fatal("missing sample shown as baseline")
+	}
+}
+
+func TestHeatmapShowsIntervalChurn(t *testing.T) {
+	r := Report{Snapshots: []SnapshotInput{{}, {}, {}}, Sites: []Site{{Stack: "build ← main.cache (main.go:10)", Points: []Point{
+		{RetainedBytes: number(1024)},
+		{RetainedBytes: number(1024), DeltaBytes: number(0), ChurnBytes: number(2048)},
+		{RetainedBytes: number(0), DeltaBytes: number(-1024), ChurnBytes: number(0)},
+	}}}}
+	var out bytes.Buffer
+	if err := renderHTML(&out, r, "latest", 1); err != nil {
+		t.Fatal(err)
+	}
+	html := out.String()
+	for _, want := range []string{`allocation churn 2 KiB</span>`, `allocation churn 0 bytes</span>`, `-1 KiB (shrinkage)`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Count(html, `<span class="churn">`) != 2 {
+		t.Fatal("baseline should not show interval churn")
 	}
 }
 
