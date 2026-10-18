@@ -1,13 +1,16 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 func orderSites(sites []Site, key string) ([]Site, error) {
@@ -60,6 +63,65 @@ func value(n *int64) string {
 	return fmt.Sprint(*n)
 }
 
+func grouped(n *int64) string {
+	if n == nil {
+		return "unknown"
+	}
+	digits := fmt.Sprint(*n)
+	sign := ""
+	if strings.HasPrefix(digits, "-") {
+		sign, digits = "-", digits[1:]
+	}
+	var result strings.Builder
+	result.WriteString(sign)
+	for i, digit := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			result.WriteByte(',')
+		}
+		result.WriteRune(digit)
+	}
+	return result.String()
+}
+
+func groupedSigned(n *int64) string {
+	if n != nil && *n > 0 {
+		return "+" + grouped(n)
+	}
+	return grouped(n)
+}
+
+func humanBytes(n *int64) string {
+	if n == nil {
+		return "unknown"
+	}
+	const binaryUnit = 1024
+	units := []string{"bytes", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+	amount := math.Abs(float64(*n))
+	unit := 0
+	for amount >= binaryUnit && unit < len(units)-1 {
+		amount /= binaryUnit
+		unit++
+	}
+	if unit == 0 {
+		return fmt.Sprintf("%d bytes", *n)
+	}
+	sign := ""
+	if *n < 0 {
+		sign = "-"
+	}
+	if amount == math.Trunc(amount) {
+		return fmt.Sprintf("%s%.0f %s", sign, amount, units[unit])
+	}
+	return fmt.Sprintf("%s%.1f %s", sign, amount, units[unit])
+}
+
+func humanSigned(n *int64) string {
+	if n != nil && *n > 0 {
+		return "+" + humanBytes(n)
+	}
+	return humanBytes(n)
+}
+
 func cellClass(n *int64) string {
 	if n == nil {
 		return "unknown"
@@ -86,19 +148,89 @@ func cellLabel(n *int64) string {
 	return "no change"
 }
 
+type callFrame struct {
+	Name   string
+	Source string
+	Full   string
+}
+
+func shortPath(path string, parts int) string {
+	segments := strings.Split(path, "/")
+	if len(segments) > parts {
+		segments = segments[len(segments)-parts:]
+	}
+	return strings.Join(segments, "/")
+}
+
+func stackFrames(stack string) []callFrame {
+	parts := strings.Split(stack, " ← ")
+	frames := []callFrame{}
+	for i := len(parts) - 1; i > 0; i-- {
+		if strings.HasPrefix(parts[i], "mapping:") {
+			continue
+		}
+		name, source, _ := strings.Cut(parts[i], " (")
+		frames = append(frames, callFrame{shortPath(name, 1), shortPath(strings.TrimSuffix(source, ")"), 3), parts[i]})
+	}
+	if len(frames) == 0 {
+		return []callFrame{{Name: stack, Full: stack}}
+	}
+	return frames
+}
+
+func siteLabel(stack string) string {
+	frames := stackFrames(stack)
+	return frames[len(frames)-1].Name
+}
+
+type origin struct {
+	Label string
+	Value string
+	Full  string
+}
+
+func stackOrigins(stack string) []origin {
+	parts := strings.Split(stack, " ← ")
+	result := []origin{{Label: "Build", Value: parts[0], Full: parts[0]}}
+	if len(result[0].Value) > 12 {
+		result[0].Value = result[0].Value[:12]
+	}
+	seen := map[string]bool{}
+	for _, part := range parts[1:] {
+		if !strings.HasPrefix(part, "mapping:") || seen[part] {
+			continue
+		}
+		seen[part] = true
+		identity, file, _ := strings.Cut(strings.TrimPrefix(part, "mapping:"), ":")
+		if len(identity) > 12 {
+			identity = identity[:12]
+		}
+		result = append(result, origin{Label: "Mapping", Value: fmt.Sprintf("%s (%s)", file, identity), Full: part})
+	}
+	return result
+}
+
+func percent(current, peak *int64) int {
+	if current == nil || peak == nil || *peak <= 0 || *current <= 0 {
+		return 0
+	}
+	if *current >= *peak {
+		return 100
+	}
+	return int(float64(*current) / float64(*peak) * 100)
+}
+
+//go:embed report.tmpl
+var reportTemplate string
+
 var heatmap = template.Must(template.New("heatmap").Funcs(template.FuncMap{
 	"signed": signed, "value": value, "class": cellClass, "label": cellLabel,
-}).Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Go heap retained memory</title><style>
-body{font:1rem system-ui,sans-serif;margin:2rem;color:#202020}table{border-collapse:collapse;width:100%}th,td{border:1px solid #777;padding:.5rem;text-align:right}th:first-child,td:first-child{text-align:left}td{white-space:nowrap}.growth{background:#b8e4cc}.shrinkage{background:#f6c6c0}.no-change{background:#eee}.unknown{background:#fff}.legend span{padding:.3rem;margin-right:1rem}details{white-space:normal}caption{text-align:left;font-weight:bold;margin-bottom:1rem}
-</style></head><body><h1>Retained memory by allocation site</h1>
-<p>Heap profiles contain sampling estimates, not object identity or access frequency. Stable estimates do not prove object survival or inactivity. Allocation churn measures differences in cumulative allocation samples.</p>
-<p class="legend" aria-label="Change legend">Legend: <span class="growth">growth (+)</span><span class="shrinkage">shrinkage (-)</span><span class="no-change">no change (0)</span><span class="unknown">unknown</span></p>
-{{if .Warnings}}<h2>Warnings</h2><ul>{{range .Warnings}}<li>{{.}}</li>{{end}}</ul>{{end}}
-<table><caption>Retained memory (bytes); showing {{len .Sites}} of {{.Total}} sites. Sorted by {{.Sort}}.</caption><thead><tr><th scope="col">Allocation site</th>{{range .Snapshots}}<th scope="col">{{.Time.Format "2006-01-02 15:04:05Z07:00"}}</th>{{end}}</tr></thead><tbody>
-{{range .Sites}}<tr><th scope="row"><details><summary>{{.Stack}}</summary><p>Peak retained memory: {{value .PeakBytes}} bytes. Net change: {{signed .NetBytes}} bytes. Allocation churn: {{value .TotalChurnBytes}} bytes. Stable estimate: {{.Stable}}.</p><p>Retained objects: {{range .Points}}{{value .RetainedObjects}}; {{end}} Net change: {{signed .NetObjects}} objects.</p></details></th>{{range .Points}}<td class="{{class .DeltaBytes}}" aria-label="retained memory {{value .RetainedBytes}} bytes; {{label .DeltaBytes}} {{signed .DeltaBytes}} bytes; retained objects {{value .RetainedObjects}}; object change {{signed .DeltaObjects}}; allocation churn {{value .ChurnBytes}} bytes">{{value .RetainedBytes}} bytes<br>{{if .DeltaBytes}}{{signed .DeltaBytes}} bytes ({{label .DeltaBytes}}){{else}}baseline{{end}}</td>{{end}}</tr>{{end}}
-</tbody></table></body></html>`))
+	"siteLabel": siteLabel, "percent": percent,
+	"grouped": grouped, "groupedSigned": groupedSigned,
+	"humanBytes": humanBytes, "humanSigned": humanSigned,
+	"stackFrames": stackFrames, "stackOrigins": stackOrigins,
+	"add": func(a, b int) int { return a + b },
+}).Parse(reportTemplate))
 
 func renderHTML(w io.Writer, r Report, sortBy string, limit int) error {
 	sites, err := orderSites(r.Sites, sortBy)
@@ -153,7 +285,7 @@ func printTable(w io.Writer, r Report, limit int) {
 			if category.key == "churn" {
 				churn = s.Points[len(s.Points)-1].ChurnBytes
 			}
-			fmt.Fprintf(w, "  retained memory %s bytes | change %s | allocation churn %s bytes | %s\n", value(s.Points[len(s.Points)-1].RetainedBytes), signed(s.NetBytes), value(churn), s.Stack)
+			fmt.Fprintf(w, "  retained memory %s | change %s | allocation churn %s | %s\n", humanBytes(s.Points[len(s.Points)-1].RetainedBytes), humanSigned(s.NetBytes), humanBytes(churn), siteLabel(s.Stack))
 			shown++
 		}
 		if shown == 0 {

@@ -33,6 +33,102 @@ func TestHeatmapEscapesAndLabelsCells(t *testing.T) {
 	}
 }
 
+func TestHeatmapLayoutAndSearch(t *testing.T) {
+	r := Report{Snapshots: []SnapshotInput{{}, {}}, Sites: []Site{
+		{Stack: "build ← mapping:binary ← github.com/example/pkg/cache.Store (cache.go:12)", NetBytes: number(42), Points: []Point{{RetainedBytes: number(42)}, {RetainedBytes: number(84), DeltaBytes: number(42)}}},
+		{Stack: "build ← main.other (main.go:5)", NetBytes: number(0), Points: []Point{{RetainedBytes: number(1)}, {RetainedBytes: number(1), DeltaBytes: number(0)}}},
+	}}
+	var out bytes.Buffer
+	if err := renderHTML(&out, r, "growth", 1); err != nil {
+		t.Fatal(err)
+	}
+	html := out.String()
+	for _, want := range []string{`<main`, `class="stat-grid"`, `class="site-title">cache.Store`, `id="site-search"`, `id="site-count" aria-live="polite"`, `data-search="build`, `@media (max-width: 760px)`, `rows.forEach`, `42 bytes`, `showing 1 of 2 sites`, `Scroll sideways to compare snapshots`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(html, `class="site-title">main.other`) {
+		t.Fatal("visible row limit ignored")
+	}
+}
+
+func TestHeatmapReadableLargeValues(t *testing.T) {
+	r := Report{Snapshots: []SnapshotInput{{}, {}}, Sites: []Site{{Stack: "build ← main.cache (main.go:10)", Points: []Point{
+		{RetainedBytes: number(0)}, {RetainedBytes: number(67108864), DeltaBytes: number(67108864)},
+	}}}}
+	var out bytes.Buffer
+	if err := renderHTML(&out, r, "latest", 1); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "64 MiB") || !strings.Contains(out.String(), "&#43;64 MiB") || !strings.Contains(out.String(), "retained memory 67108864 bytes") {
+		t.Fatal("lost binary units or exact numeric value")
+	}
+}
+
+func TestByteUnits(t *testing.T) {
+	for _, tc := range []struct{ bytes int64; want string }{
+		{0, "0 bytes"}, {1023, "1023 bytes"}, {1024, "1 KiB"},
+		{1536, "1.5 KiB"}, {67108864, "64 MiB"}, {-(2 << 30), "-2 GiB"},
+	} {
+		if got := humanBytes(number(tc.bytes)); got != tc.want {
+			t.Errorf("%d: got %q, want %q", tc.bytes, got, tc.want)
+		}
+	}
+	if humanBytes(nil) != "unknown" || humanSigned(number(1024)) != "+1 KiB" {
+		t.Fatal("missing/positive value formatting")
+	}
+}
+
+func TestCallPathSkipsMappings(t *testing.T) {
+	stack := "build-hash ← mapping:map-hash:/victoria-metrics-prod ← github.com/VictoriaMetrics/VictoriaMetrics/lib/storage.newRawRows (github.com/VictoriaMetrics/VictoriaMetrics/lib/storage/raw_row.go:315) ← mapping:map-hash:/victoria-metrics-prod ← github.com/VictoriaMetrics/VictoriaMetrics/app/vmstorage.main (github.com/VictoriaMetrics/VictoriaMetrics/app/vmstorage/main.go:43)"
+	r := Report{Snapshots: []SnapshotInput{{}, {}}, Sites: []Site{{Stack: stack, Points: []Point{{}, {}}}}}
+	var out bytes.Buffer
+	if err := renderHTML(&out, r, "latest", 1); err != nil { t.Fatal(err) }
+	html := out.String()
+	if !strings.Contains(html, `class="call-tree"`) || strings.Count(html, `<li class="frame`) != 2 {
+		t.Fatalf("expected two call frames: %s", html)
+	}
+	path := strings.SplitN(strings.SplitN(html, `<ol class="call-tree">`, 2)[1], `</ol>`, 2)[0]
+	if strings.Index(path, `vmstorage.main`) >= strings.Index(path, `storage.newRawRows`) {
+		t.Fatal("call path must start at caller and end at allocation site")
+	}
+	for _, want := range []string{`lib/storage/raw_row.go:315`, `Profile identity`, `build-hash`, `victoria-metrics-prod`} {
+		if !strings.Contains(html, want) { t.Errorf("missing %q", want) }
+	}
+	if strings.Contains(html, `<code class="stack">`) { t.Fatal("raw stack still displayed") }
+}
+
+func TestReportUsesLightTheme(t *testing.T) {
+	var out bytes.Buffer
+	if err := renderHTML(&out, Report{Snapshots: []SnapshotInput{{}, {}}}, "latest", 1); err != nil { t.Fatal(err) }
+	if !strings.Contains(out.String(), "color-scheme:light") || strings.Contains(out.String(), "color-scheme:dark") {
+		t.Fatal("report must use light theme")
+	}
+}
+
+func TestTableUsesUnitsAndShortSite(t *testing.T) {
+	r := Report{Sites: []Site{{Stack: "build-hash ← mapping:map-hash:/victoria-metrics-prod ← github.com/example/storage.newRawRows (raw_row.go:315)", NetBytes: number(67108864), TotalChurnBytes: number(67108864), Points: []Point{{RetainedBytes: number(0)}, {RetainedBytes: number(67108864), ChurnBytes: number(67108864)}}}}}
+	var out bytes.Buffer
+	printTable(&out, r, 1)
+	if !strings.Contains(out.String(), "64 MiB") || !strings.Contains(out.String(), "storage.newRawRows") || strings.Contains(out.String(), "build-hash") {
+		t.Fatalf("table unreadable: %s", out.String())
+	}
+}
+
+func TestHeatmapDistinguishesUnknownFromBaseline(t *testing.T) {
+	r := Report{Snapshots: []SnapshotInput{{}, {}}, Sites: []Site{{Stack: "build ← main.cache (main.go:10)", Points: []Point{
+		{RetainedBytes: number(10)}, {},
+	}}}}
+	var out bytes.Buffer
+	if err := renderHTML(&out, r, "latest", 1); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `>unknown change</span>`) || strings.Count(out.String(), `>baseline</span>`) != 1 {
+		t.Fatal("missing sample shown as baseline")
+	}
+}
+
 func TestEndToEndThreeSnapshots(t *testing.T) {
 	types := []string{"inuse_space", "inuse_objects", "alloc_space", "alloc_objects"}
 	a := input(fixture(t, types, 1, "main.app", []int64{100, 1, 200, 2}, false), 1)
