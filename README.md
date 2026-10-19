@@ -1,13 +1,13 @@
-# pprof-mem-map
+# pprof-mem-churn
 
 Compare heap profiles from one Go process. CLI prints ranked allocation sites and writes JSON plus a self-contained HTML heatmap.
 
 ## Run demo
 
 ```sh
-mkdir -p /home/vrutkovs/tmp/opencode/pprof-mem-map-demo
-go run ./examples/demo /home/vrutkovs/tmp/opencode/pprof-mem-map-demo
-go run . -manifest /home/vrutkovs/tmp/opencode/pprof-mem-map-demo/manifest.json -json /home/vrutkovs/tmp/opencode/pprof-mem-map-demo/report.json -html /home/vrutkovs/tmp/opencode/pprof-mem-map-demo/report.html
+mkdir -p /home/vrutkovs/tmp/opencode/pprof-mem-churn-demo
+go run ./examples/demo /home/vrutkovs/tmp/opencode/pprof-mem-churn-demo
+go run . -manifest /home/vrutkovs/tmp/opencode/pprof-mem-churn-demo/manifest.json -json /home/vrutkovs/tmp/opencode/pprof-mem-churn-demo/report.json -html /home/vrutkovs/tmp/opencode/pprof-mem-churn-demo/report.html
 go test ./...
 ```
 

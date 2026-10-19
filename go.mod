@@ -1,4 +1,4 @@
-module github.com/vrutkovs/pprof-mem-map
+module github.com/vrutkovs/pprof-mem-churn
 
 go 1.26.8
 

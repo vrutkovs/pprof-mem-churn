@@ -14,7 +14,7 @@ func main() {
 	limit := flag.Int("limit", 30, "visible rows per table and heatmap")
 	flag.Parse()
 	if err := run(*manifest, *jsonPath, *htmlPath, *sortBy, *limit, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "pprof-mem-map:", err)
+		fmt.Fprintln(os.Stderr, "pprof-mem-churn:", err)
 		os.Exit(1)
 	}
 }
